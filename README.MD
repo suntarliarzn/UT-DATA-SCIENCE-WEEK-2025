@@ -5,10 +5,10 @@ This repository contains my work for the Data Science Week 2025 datathon at the 
 
 The project focuses on classifying physiological states using engineered features derived from sensor data. The task was to predict four conditions:
 
-baseline
-meditation
-stress
-break
+- baseline 
+- meditation
+- stress
+- break
 
 I explored multiple machine learning and deep learning approaches, with a strong focus on model comparison, feature selection, and interpretability.
 
