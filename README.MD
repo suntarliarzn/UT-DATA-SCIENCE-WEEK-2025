@@ -26,9 +26,9 @@ Instead of relying on a single model, I built multiple pipelines and compared th
 
 🔬 Feature Engineering & Selection
 Methods used:
-Random Forest feature importance
-Recursive Feature Elimination (RFE)
-SHAP values (for XGBoost)
+- Random Forest feature importance
+- Recursive Feature Elimination (RFE)
+- SHAP values (for XGBoost)
 
 ## Key findings:
 Some features had negative impact on performance
