@@ -1,0 +1,257 @@
+---
+title: "data modeling by Yaxing Li"
+author: "Yaxing Li"
+date: "2025-03-07"
+output: html_document
+---
+
+# Modeling
+
+## 1.Preparation of data and packages
+```{R}
+library("tidyverse")
+library("tidymodels")
+library(shapviz)  # Needs development version 0.9.0 from github
+sessionInfo()
+data <- read_csv("final_engineered_data.csv")
+```
+
+## 2.transforming the label variable
+```{R}
+data |>  dim()
+data |> head()
+# Split the data into training set
+train_data <- data %>% 
+  filter(split == "train") %>% 
+  mutate(label=factor(label, levels=c('baseline','meditation','stress','break')))  # Convert the label column to factor
+
+test_data <- data %>% 
+  filter(split == "test")
+
+```
+
+## 3. check participants intersect
+```{R}
+train_subjects <- train_data%>% select(participant_id) %>% distinct()
+test_subjects <- test_data %>% select(participant_id) %>% distinct()
+intersect(train_subjects, test_subjects)
+```
+
+## 4.Train-Test split
+```{r}
+set.seed(0) 
+# Remove 'split' from the dataset before creating the recipe
+train_data_clean <- train_data %>% select(-split)
+# Split the data
+data_split <- group_initial_split(train_data_clean, prop = 5/6, group = participant_id) 
+train_split_data <- training(data_split)
+val_split_data <- testing(data_split)
+```
+
+## 5. Create the workflow
+```{R}
+# Load the libraries
+library(xgboost)
+library(tidymodels)
+library(dplyr)
+library(yardstick)
+
+# Define a preprocessing recipe
+train_recipe <- recipe(label ~ ., data = train_split_data) %>%
+  update_role(chunk_id, new_role = "ID") %>%  
+  update_role(participant_id, new_role = "ID") %>%
+  step_naomit(all_predictors()) %>%             # Remove missing values
+  step_mutate_at(all_numeric_predictors(), fn = ~replace(., is.infinite(.), NA)) %>%  # Replace Inf with NA
+  step_impute_knn(all_numeric_predictors(), neighbors = 20) %>% # KNN imputation
+  step_normalize(all_numeric_predictors()) %>%  # Normalize numerical features
+  step_dummy(all_nominal_predictors()) %>%      # One-hot encode categorical variables
+  step_corr(all_numeric_predictors(), threshold = 0.8) %>%  # Remove highly correlated features
+  step_zv(all_predictors()) %>%                 # Remove zero-variance predictors
+  # step_rm(mean_rate_of_change, bpm_predicted_from_scr_peaks) |>  # Remove specified features
+  step_pca(all_numeric_predictors(), num_comp = 5)  # Reduce dimensionality with PCA
+
+# Prepare the recipe
+prepped_recipe <- prep(train_recipe, training = train_split_data)
+
+# Apply transformations to the training and validation data
+train_processed <- bake(prepped_recipe, new_data = train_split_data)
+val_processed <- bake(prepped_recipe, new_data = val_split_data)
+
+# Remove non-predictor columns (e.g., 'label', 'chunk_id', etc.)
+X_train <- train_processed %>%
+  select(-label, -chunk_id, -participant_id)  # Adjust based on your dataset
+
+X_val <- val_processed %>%
+  select(-label, -chunk_id, -participant_id)  # Adjust based on your dataset
+
+# Convert to matrix format for XGBoost
+X_train_matrix <- as.matrix(X_train)
+X_val_matrix <- as.matrix(X_val)
+
+# Convert the target variable to numeric (0/1 for classification)
+y_train_vector <- as.numeric(train_processed$label)
+y_val_vector <- as.numeric(val_processed$label)
+```
+
+## Define the XGBoost Model and Workflow
+```{R}
+# Define the XGBoost model with hyperparameters to tune
+xgb_model <- boost_tree(
+  mode = "classification",  # Classification task
+  trees = tune(),           # Tune number of trees
+  tree_depth = tune(),      # Tune tree depth
+  learn_rate = tune(),      # Tune learning rate
+  min_n = tune(),           # Tune minimum samples in a node
+  loss_reduction = tune(),  # Regularization parameter
+  sample_size = tune()      # Subsampling ratio
+) %>%
+  set_engine("xgboost")
+
+# Define the workflow
+xgb_workflow <- workflow() %>%
+  add_model(xgb_model) %>%
+  add_recipe(train_recipe)
+
+```
+
+## Tune the hyperparameters
+```{R}
+library(tune) 
+# Define the search space for Bayesian optimization
+xgb_param_set <- parameters(
+  trees(range = c(100, 500)),         # Number of trees
+  tree_depth(range = c(3, 10)),        # Max depth of trees
+  learn_rate(range = c(0.01, 0.3)),    # Learning rate
+  min_n(range = c(5, 20)),             # Minimum samples per node
+  loss_reduction(range = c(0, 10)),    # Regularization parameter
+  sample_prop(range = c(0.5, 1.0))     # FIXED: Use sample_prop() for proportions
+)
+
+# Bayesian optimization control settings
+bayes_control <- control_bayes(
+  no_improve = 5,   # Stop after 5 rounds without improvement
+  verbose = TRUE    # Print optimization progress
+)
+
+# Perform Bayesian optimization with 10-fold cross-validation
+xgb_tune_results <- tune_bayes(
+  xgb_workflow,
+  resamples = vfold_cv(train_split_data, v = 10),
+  param_info = xgb_param_set,  # Define the search space
+  initial = 10,  # Start with 10 random configurations
+  iter = 20,     # Run for 20 iterations
+  metrics = metric_set(accuracy, roc_auc),  # Evaluate using accuracy and ROC AUC
+  control = bayes_control
+)
+
+# View the best hyperparameters based on accuracy
+best_xgb_params <- select_best(xgb_tune_results, metric = "accuracy")
+print(best_xgb_params)
+```
+
+## Train the final model
+```{R}
+# Re-train the XGBoost model with the best parameters
+final_xgb_model <- boost_tree(
+  mode = "classification",
+  trees = best_xgb_params$trees,
+  tree_depth = best_xgb_params$tree_depth,
+  learn_rate = best_xgb_params$learn_rate,
+  min_n = best_xgb_params$min_n
+) %>%
+  set_engine("xgboost")
+
+# Update the workflow with the final model
+xgb_workflow_final <- workflow() %>%
+  add_model(final_xgb_model) %>%
+  add_recipe(train_recipe)
+
+# Train the final model on the whole training data
+trained_xgb_model <- fit(xgb_workflow_final, data = train_split_data)
+```
+
+## Make Predictions and Evalute the Model
+```{R}
+# Make predictions on the validation data
+val_predictions <- predict(trained_xgb_model, val_split_data)
+
+# Bind predictions with the actual labels
+val_predictions_final <- bind_cols(val_split_data, val_predictions)
+
+# Evaluate the performance of the final model using multiple metrics
+val_metrics <- val_predictions_final %>%
+  metrics(truth = label, estimate = .pred_class)
+
+# Print evaluation metrics
+print(val_metrics)
+
+```
+
+## Model interpretation
+```{R}
+library(shapviz)
+table(val_predictions$.pred_class)
+
+## based on the classfication, I found it is difficult to distinguish between labels of meditation and break.
+
+# Extract the fitted model's engine (XGBoost)
+xgb_fit_engine <- extract_fit_engine(trained_xgb_model)
+
+# Make sure the column names in the baked train data match the model's expected feature names
+# The model uses the feature names from the recipe transformations (e.g., PCA, dummy variables)
+baked_train_data <- bake(prepped_recipe, new_data = train_split_data)
+
+# Ensure columns in the baked data match the ones used in the model
+colnames(baked_train_data)
+
+# The baked data should exclude columns like 'label', 'participant_id', 'chunk_id', etc.
+X_pred <- baked_train_data %>%
+  select(-label, -chunk_id, -participant_id)  # Adjust based on your dataset
+
+# Convert to matrix format for the SHAP values calculation
+X_pred_matrix <- as.matrix(X_pred)
+
+# Extract SHAP values using shapviz
+sv <- shapviz(xgb_fit_engine, X_pred = X_pred_matrix, X = X_pred)
+
+# SHAP importance plot
+svplot <- sv_importance(sv, kind = "beeswarm")
+svplot
+
+# Extract each individual plot from the list of plots
+plot_baseline <- svplot[[1]]
+plot_meditation <- svplot[[2]]
+plot_stress <- svplot[[3]]
+plot_break <- svplot[[4]]
+
+# Optionally, adjust labels for clarity
+svplot[[1]]$labels$title <- 'Baseline'
+svplot[[2]]$labels$title <- 'Meditation'
+svplot[[3]]$labels$title <- 'Stress'
+svplot[[4]]$labels$title <- 'Break'
+
+plot_break
+plot_meditation
+plot_stress
+plot_baseline
+
+# By analyzing the plots, I found the features are not useful or very confusing for distinguishing break and meditation sessions: min_bvp, mean_rate_of_change, mad_mag, mean_bvp and range_temp. So I will delete them in the recipe.
+```
+
+## fit model with out 2 features and PCA to the test data
+```{R}
+# Step 9: Train the final model on the entire training set
+final_model <- fit(trained_xgb_model,  data = train_data_clean)
+# Step 10: Make predictions on the test data
+submission_data <- 
+  augment(final_model, test_data, type = "class") %>% 
+  select(participant_id, chunk_id, .pred_class)
+
+# Save the predictions
+submission_data %>%
+  rename(label = .pred_class) %>%
+  write.csv('DSW25_XGBOOS_model_with_5_PCA.csv', row.names = FALSE)
+```
+
+
+

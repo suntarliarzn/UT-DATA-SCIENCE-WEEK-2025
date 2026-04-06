@@ -1,0 +1,222 @@
+---
+title: "data modeling by Yaxing Li"
+author: "Yaxing Li"
+date: "2025-03-07"
+output: html_document
+---
+
+# Modeling
+
+## 1.Preparation of data and packages
+```{R}
+library(rBayesianOptimization)
+library(ParBayesianOptimization)
+library(torch)    # PyTorch for R
+library(torchvision)  # Data transformations (if needed)
+library(keras)    # Keras for deep learning
+library(tensorflow) # TensorFlow backend
+library(tidymodels)  # Preprocessing and workflows
+library("tidyverse")
+library("tidymodels")
+library("reticulate")
+sessionInfo()
+data <- read_csv("final_engineered_data.csv")
+```
+
+## 2.transforming the label variable
+```{R}
+data |>  dim()
+data |> head()
+# Split the data into training set
+train_data <- data %>% 
+  filter(split == "train") %>% 
+  mutate(label=factor(label, levels=c('baseline','meditation','stress','break')))  # Convert the label column to factor
+
+test_data <- data %>% 
+  filter(split == "test")
+
+```
+
+## 3. check participants intersect
+```{R}
+train_subjects <- train_data%>% select(participant_id) %>% distinct()
+test_subjects <- test_data %>% select(participant_id) %>% distinct()
+intersect(train_subjects, test_subjects)
+```
+
+## 4.Train-Test split
+```{r}
+set.seed(123) 
+# Remove 'split' from the dataset before creating the recipe
+train_data_clean <- train_data %>% select(-split)
+# Split the data
+data_split <- group_initial_split(train_data_clean, prop = 5/6, group = participant_id) 
+train_split_data <- training(data_split)
+val_split_data <- testing(data_split)
+```
+
+## 5. Create the workflow
+```{R}
+train_recipe <- recipe(label ~ ., data = train_split_data) %>%
+  update_role(chunk_id, new_role = "ID") %>%  
+  update_role(participant_id, new_role = "ID") %>%
+  step_naomit(all_predictors()) %>%             
+  step_mutate_at(all_numeric_predictors(), fn = ~replace(., is.infinite(.), NA)) %>%
+  step_impute_knn(all_numeric_predictors(), neighbors = 20) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_corr(all_numeric_predictors(), threshold = 0.8) %>%
+  step_zv(all_predictors())
+
+# Prepare the recipe
+prepped_recipe <- prep(train_recipe, training = train_split_data)
+
+# Apply transformations
+train_processed <- bake(prepped_recipe, new_data = train_split_data)
+val_processed <- bake(prepped_recipe, new_data = val_split_data)
+
+# Convert labels to numeric factors (for deep learning)
+train_processed$label <- as.numeric(as.factor(train_processed$label)) - 1
+val_processed$label <- as.numeric(as.factor(val_processed$label)) - 1
+
+# Separate predictors and targets
+X_train <- train_processed %>% select(-chunk_id, -participant_id, -label)
+y_train <- train_processed$label
+
+X_val <- val_processed %>% select(-chunk_id, -participant_id, -label)
+y_val <- val_processed$label
+
+# Convert to matrix format
+X_train_matrix <- as.matrix(X_train)
+X_val_matrix <- as.matrix(X_val)
+```
+
+## 6.Build a Deep Learning Model with Keras
+```{R}
+
+build_model <- function(lr = 0.001, dropout_rate = 0.3, l2_rate = 0.001, units_1 = 128, units_2 = 64) {
+  model <- keras_model_sequential() %>%
+    layer_dense(units = units_1, activation = "relu", kernel_regularizer = regularizer_l2(l2_rate)) %>%
+    layer_batch_normalization() %>%
+    layer_dropout(rate = dropout_rate) %>%
+    layer_dense(units = units_2, activation = "relu", kernel_regularizer = regularizer_l2(l2_rate)) %>%
+    layer_batch_normalization() %>%
+    layer_dropout(rate = dropout_rate) %>%
+    layer_dense(units = 4, activation = "softmax")  # 4 categories in the output layer
+  
+  model %>% compile(
+    loss = "sparse_categorical_crossentropy",
+    optimizer = optimizer_adam(learning_rate = lr),  # Updated to use learning_rate
+    metrics = c("accuracy")
+  )
+  
+  return(model)
+}
+
+
+
+
+```
+
+
+## 7.Tune the hyperparameters
+```{R}
+objective_function <- function(lr, dropout_rate, l2_rate, units_1, units_2) {
+  
+  # Build the model
+  model <- build_model(lr = lr, dropout_rate = dropout_rate, l2_rate = l2_rate, units_1 = units_1, units_2 = units_2)
+  
+  # Train the model
+  history <- model %>% fit(
+    X_train_matrix, y_train,
+    epochs = 30,
+    batch_size = 32,
+    validation_data = list(X_val_matrix, y_val),
+    verbose = 1,
+    callbacks = list(callback_early_stopping(monitor = "val_loss", patience = 5))
+  )
+  
+  # Get the best validation accuracy
+  val_accuracy <- max(history$metrics$val_accuracy)  # Get best validation accuracy
+  return(list(Score = val_accuracy, Pred = history))
+}
+
+# Define the hyperparameter search space, including l2_rate
+bounds <- list(
+  lr = c(0.0001, 0.01),  # Learning rate
+  dropout_rate = c(0.2, 0.5),  # Dropout rate
+  units_1 = c(64, 256),  # Units in the first dense layer
+  units_2 = c(32, 128),  # Units in the second dense layer
+  l2_rate = c(0.0001, 0.01)  # l2 regularization rate
+)
+
+# Run Bayesian optimization
+bayes_opt <- BayesianOptimization(
+  FUN = objective_function,
+  bounds = bounds,
+  init_points = 5,  # Number of random initial points
+  n_iter = 25,      # Number of optimization iterations
+  acq = "ei",       # Acquisition function (Expected Improvement)
+  kappa = 2.5,      # Exploration parameter
+  eps = 0.0         # Tolerance level
+)
+
+# View the results of the optimization
+print(bayes_opt$Best_Par)
+best_params <- bayes_opt$Best_Par
+
+
+```
+
+## 8.Train the final model with the best parameters
+```{R}
+# Extract and convert Best Parameters to numeric
+lr <- as.numeric(best_params["lr"])
+dropout_rate <- as.numeric(best_params["dropout_rate"])
+l2_rate <- as.numeric(best_params["l2_rate"])  # Extract l2_rate from best_params
+units_1 <- as.numeric(best_params["units_1"])
+units_2 <- as.numeric(best_params["units_2"])
+
+# Build Final Model
+final_model <- build_model(lr, dropout_rate, l2_rate, units_1, units_2)
+
+# Train Final Model
+final_history <- final_model %>% fit(
+  X_train_matrix, y_train,
+  epochs = 30,
+  batch_size = 32,
+  validation_data = list(X_val_matrix, y_val),
+  verbose = 1
+)
+
+```
+
+## Make Predictions and Evalute the Model
+```{R}
+# Evaluate the final model
+final_results <- predict(final_model, X_val_matrix)
+
+# Make predictions on the test data
+predictions <- final_model %>% predict(X_val_matrix)
+
+# Convert predictions to class labels
+pred_class <- apply(predictions, 1, which.max) - 1  # Subtract 1 because labels start from 0
+
+# Convert numeric predictions back to factor labels
+pred_labels <- factor(pred_class, levels = c(0, 1, 2, 3), labels = c('baseline', 'meditation', 'stress', 'break'))
+
+# Create a data frame with participant_id, chunk_id, and predicted labels
+submission_data <- data.frame(
+  participant_id = test_data$participant_id,
+  chunk_id = test_data$chunk_id,
+  label = pred_labels
+)
+table(submission_data$label)
+# submission_data %>%
+  write.csv('DSW25_CNN_model_with_val.csv', row.names = FALSE)
+```
+
+
+
+
+

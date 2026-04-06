@@ -1,0 +1,223 @@
+---
+title: "data modeling by Yaxing Li"
+author: "Yaxing Li"
+date: "2025-03-07"
+output: html_document
+---
+
+# Modeling
+
+## 1.Preparation of data and packages
+```{R}
+library(rBayesianOptimization)
+library(ParBayesianOptimization)
+library(torch)    # PyTorch for R
+library(torchvision)  # Data transformations (if needed)
+library(keras)    # Keras for deep learning
+library(tensorflow) # TensorFlow backend
+library(tidymodels)  # Preprocessing and workflows
+library("tidyverse")
+library("tidymodels")
+sessionInfo()
+data <- read_csv("final_engineered_data.csv")
+```
+
+## 2.transforming the label variable
+```{R}
+# Transforming the label variable
+data |> dim()
+data |> head()
+
+# Split the data into training and test set
+train_data <- data %>% 
+  filter(split == "train") %>% 
+  mutate(label=factor(label, levels=c('baseline','meditation','stress','break')))  # Convert the label column to factor
+train_data <- train_data %>% select(-split)
+test_data <- data %>% 
+  filter(split == "test")
+test_data <- test_data %>% select(-split)
+k_folds <- 5  # You can adjust this value for the number of folds you want
+set.seed(123)  # For reproducibility
+cv_splits <- vfold_cv(train_data, v = k_folds, strata = label)
+
+```
+
+
+## 3. Create the workflow
+```{R}
+# Define the model building function
+build_model <- function(lr = 0.001, dropout_rate = 0.3, units_1 = 128, units_2 = 64, input_dim) {
+  input_layer <- layer_input(shape = input_dim)
+  
+  model <- input_layer %>%
+    layer_dense(units = units_1, activation = "relu") %>%
+    layer_dropout(rate = dropout_rate) %>%
+    layer_dense(units = units_2, activation = "relu") %>%
+    layer_dropout(rate = dropout_rate) %>%
+    layer_dense(units = 4, activation = "softmax")  # 4 categories in the output layer
+  
+  model <- keras_model(inputs = input_layer, outputs = model)
+  
+  model %>% compile(
+    loss = "sparse_categorical_crossentropy",
+    optimizer = optimizer_adam(learning_rate = lr),
+    metrics = c("accuracy")
+  )
+  
+  return(model)
+}
+
+objective_function <- function(lr, dropout_rate, units_1, units_2) {
+  
+  # Prepare the recipe for preprocessing
+  train_recipe <- recipe(label ~ ., data = train_data) %>%
+    update_role(chunk_id, new_role = "ID") %>%
+    update_role(participant_id, new_role = "ID") %>%
+    step_naomit(all_predictors()) %>%
+    step_mutate_at(all_numeric_predictors(), fn = ~replace(., is.infinite(.), NA)) %>%
+    step_impute_knn(all_numeric_predictors(), neighbors = 20) %>%
+    step_normalize(all_numeric_predictors()) %>%
+    step_dummy(all_nominal_predictors()) %>%
+    step_corr(all_numeric_predictors(), threshold = 0.8) %>%
+    step_zv(all_predictors()) 
+  
+  # Prepare the recipe and apply transformations to training data
+  prepped_recipe <- prep(train_recipe, training = train_data)
+  train_processed <- bake(prepped_recipe, new_data = train_data)
+  
+  # Convert labels to numeric (for Keras model)
+  train_processed$label <- as.numeric(as.factor(train_processed$label)) - 1
+
+  # Separate predictors and targets
+  X_train <- train_processed %>% select(-label)
+  y_train <- train_processed$label
+
+  # Convert to matrix format
+  X_train_matrix <- as.matrix(X_train)
+
+  # Build and compile the model with current hyperparameters
+  model <- build_model(lr, dropout_rate, units_1, units_2, ncol(X_train_matrix))
+
+  # Fit the model
+  history <- model %>% fit(
+    X_train_matrix, y_train,
+    epochs = 10,
+    batch_size = 32,
+    validation_split = 0.2,
+    verbose = 0,
+    callbacks = list(callback_early_stopping(monitor = "val_loss", patience = 5))
+  )
+
+  # Return the validation accuracy in a list format
+  val_accuracy <- max(history$metrics$val_accuracy)
+  return(list(Score = val_accuracy))  # Ensure returning in a list format
+}
+
+# Define the search space for Bayesian Optimization
+bounds <- list(
+  lr = c(1e-5, 1e-2),               # Learning rate between 1e-5 and 1e-2
+  dropout_rate = c(0, 0.5),         # Dropout rate between 0 and 0.5
+  units_1 = c(32, 256),             # Number of units in the first dense layer
+  units_2 = c(32, 256)              # Number of units in the second dense layer
+)
+
+# Perform Bayesian optimization
+set.seed(123)  # For reproducibility
+bayes_opt <- BayesianOptimization(
+  FUN = objective_function,
+  bounds = bounds,
+  init_points = 5,  # Number of random initial points to sample
+  n_iter = 25,      # Number of optimization iterations
+  acq = "ei",       # Acquisition function (Expected Improvement)
+  kappa = 2.5,      # Exploration parameter
+  eps = 0.0         # Tolerance level
+)
+
+# After optimization, you can access the best hyperparameters and fit the model
+best_params <- bayes_opt$Best_Par
+```
+## 8.Train the final model with the best parameters
+```{R}
+# Prepare the recipe for preprocessing
+train_recipe <- recipe(label ~ ., data = train_data) %>%
+  update_role(chunk_id, new_role = "ID") %>%
+  update_role(participant_id, new_role = "ID") %>%
+  step_naomit(all_predictors()) %>%
+  step_mutate_at(all_numeric_predictors(), fn = ~replace(., is.infinite(.), NA)) %>%
+  step_impute_knn(all_numeric_predictors(), neighbors = 20) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_corr(all_numeric_predictors(), threshold = 0.8) %>%
+  step_zv(all_predictors())|> 
+  step_select(-participant_id, -chunk_id)  # Exclude these columns from preprocessing
+
+# Prepare the recipe and apply transformations to training data
+prepped_recipe <- prep(train_recipe, training = train_data)
+train_processed <- bake(prepped_recipe, new_data = train_data)
+
+# Convert labels to numeric (for Keras model)
+train_processed$label <- as.numeric(as.factor(train_processed$label)) - 1
+
+# Separate predictors and targets
+X_train <- train_processed %>% select(-label)
+y_train <- train_processed$label
+
+# Convert to matrix format
+X_train_matrix <- as.matrix(X_train)
+
+# Now, define the input_dim based on the number of features in X_train_matrix
+input_dim <- ncol(X_train_matrix)
+
+# Build the final model with the best parameters and the correct input dimension
+final_model <- build_model(
+  lr = best_params[["lr"]], 
+  dropout_rate = best_params[["dropout_rate"]], 
+  units_1 = best_params[["units_1"]], 
+  units_2 = best_params[["units_2"]],
+  input_dim = input_dim
+)
+
+
+```
+
+## Make Predictions and Evalute the Model
+```{R}
+# Fit the model
+final_model %>% fit(
+  X_train_matrix, y_train,
+  epochs = 10,
+  batch_size = 32,
+  verbose = 1
+)
+
+# Apply the same preprocessing steps to the test data
+
+X_test_processed <- bake(prepped_recipe, new_data = test_data)
+X_test_no_label <- X_test_processed %>% select(-label)
+# Convert to matrix format
+X_test_matrix <- as.matrix(X_test_no_label)
+# Now make predictions with the final model
+predictions <- final_model %>% predict(X_test_matrix)
+
+# Convert predictions to class labels
+pred_class <- apply(predictions, 1, which.max) - 1  # Subtract 1 for the correct class index
+pred_labels <- factor(pred_class, levels = c(0, 1, 2, 3), labels = c('baseline', 'meditation', 'stress', 'break'))
+
+# Create a data frame with participant_id, chunk_id, and predicted labels
+submission_data <- data.frame(
+  participant_id = test_data$participant_id,
+  chunk_id = test_data$chunk_id,
+  label = pred_labels  # Using the factor labels
+)
+
+table(submission_data$label)
+
+# Save predictions
+submission_data %>%
+  write.csv('DSW25_CNN_model_with_kfold.csv', row.names = FALSE)
+```
+
+
+
+
+

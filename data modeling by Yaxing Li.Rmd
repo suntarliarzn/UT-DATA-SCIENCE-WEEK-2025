@@ -1,0 +1,343 @@
+---
+title: "data modeling by Yaxing Li"
+author: "Yaxing Li"
+date: "2025-03-07"
+output: html_document
+---
+
+# Modeling
+
+## 1.Preparation of data and packages
+```{R}
+library("tidyverse")
+library("tidymodels")
+library(shapviz)  # Needs development version 0.9.0 from github
+sessionInfo()
+data <- read_csv("final_engineered_data.csv")
+```
+
+## 2.transforming the label variable
+```{R}
+data |>  dim()
+data |> head()
+# Split the data into training set
+train_data <- data %>% 
+  filter(split == "train") %>% 
+  mutate(label=factor(label, levels=c('baseline','meditation','stress','break')))  # Convert the label column to factor
+
+test_data <- data %>% 
+  filter(split == "test")
+
+```
+
+## 3. check participants intersect
+```{R}
+train_subjects <- train_data%>% select(participant_id) %>% distinct()
+test_subjects <- test_data %>% select(participant_id) %>% distinct()
+intersect(train_subjects, test_subjects)
+```
+
+## 4.Train-Test split
+```{r}
+set.seed(0) 
+# Remove 'split' from the dataset before creating the recipe
+train_data_clean <- train_data %>% select(-split)
+# Split the data
+data_split <- group_initial_split(train_data_clean, prop = 5/6, group = participant_id) 
+train_split_data <- training(data_split)
+val_split_data <- testing(data_split)
+```
+
+## 5. Create the workflow
+```{R}
+# Define a preprocessing recipe
+train_recipe <- recipe(label ~ ., data = train_split_data) %>%
+  update_role(chunk_id, new_role = "ID") %>%  
+  update_role(participant_id, new_role = "ID") %>% 
+  step_impute_knn(all_predictors(), neighbors = 4) %>%   # KNN imputation
+  step_normalize(all_numeric_predictors()) %>%  
+  step_dummy(all_nominal_predictors()) %>%      
+  step_zv(all_predictors())                     
+
+# Prepare the recipe
+prepped_recipe <- prep(train_recipe, training = train_split_data)
+
+# Apply transformations
+train_processed <- bake(prepped_recipe, new_data = train_split_data)
+val_processed <- bake(prepped_recipe, new_data = val_split_data)
+
+```
+
+## 6. knn model training
+```{R}
+library(kknn)
+# Define KNN model with k = 4
+knn_model <- nearest_neighbor(mode = "classification", neighbors = 4) %>%
+  set_engine("kknn")
+
+# Create a workflow
+train_workflow <- workflow() %>%
+  add_model(knn_model) %>%
+  add_recipe(train_recipe)
+
+# Train the KNN model
+trained_model <- fit(train_workflow, data = train_processed)
+
+# Make predictions on validation data
+val_predictions <- predict(trained_model, val_processed) %>%
+  bind_cols(val_split_data)  # Combine predictions with actual validation data
+
+# Evaluate model performance
+val_metrics <- val_predictions %>%
+  metrics(truth = label, estimate = .pred_class)
+
+print(val_metrics)
+```
+
+## hypoerparameter tuning
+```{R}
+set.seed(0)
+
+# Step 1: Set up Cross-Validation
+cv_folds <- vfold_cv(train_split_data, v = 5)  # 5-fold cross-validation
+
+# Step 2: Define the KNN Model with tune() for 'neighbors'
+knn_model <- nearest_neighbor(mode = "classification", neighbors = tune()) %>%
+  set_engine("kknn")
+
+# Step 3: Define a grid of values for the 'neighbors' hyperparameter
+neighbors_grid <- grid_regular(neighbors(range = c(1, 20)), levels = 20)
+
+# Step 4: Define a recipe (same as before, if necessary)
+train_recipe <- recipe(label ~ ., data = train_split_data) %>%
+  update_role(chunk_id, new_role = "ID") %>%  
+  update_role(participant_id, new_role = "ID") %>% 
+  step_impute_knn(all_predictors(), neighbors = 4) %>%   # KNN imputation
+  step_normalize(all_numeric_predictors()) %>%  
+  step_dummy(all_nominal_predictors()) %>%      
+  step_zv(all_predictors())
+
+# Step 5: Create a Workflow
+tune_workflow <- workflow() %>%
+  add_model(knn_model) %>%
+  add_recipe(train_recipe)
+
+# Step 6: Tune the model with cross-validation
+tune_results <- tune_grid(
+  tune_workflow,
+  resamples = cv_folds,  # Cross-validation folds
+  grid = neighbors_grid,
+  control = control_grid(save_pred = TRUE)
+)
+
+# Step 7: Get the best model
+best_k <- select_best(tune_results, metric = "accuracy")  # Choose based on accuracy
+best_k
+
+# Step 8: Finalize the workflow with the best 'k'
+final_knn_model <- nearest_neighbor(mode = "classification", neighbors = best_k$neighbors) %>%
+  set_engine("kknn")
+
+# Step 9: Train the final model with the optimal 'k=11'
+final_model <- fit(final_knn_model, label ~ ., data = train_split_data)
+
+# Step 10: Evaluate on validation data
+val_predictions <- predict(final_model, val_split_data) %>%
+  bind_cols(val_split_data)
+
+val_metrics <- val_predictions %>%
+  metrics(truth = label, estimate = .pred_class)
+
+print(val_metrics)
+```
+
+## feature selection
+```{R}
+# Load required packages
+library(caret)
+library(kknn)
+
+# Define a preprocessing recipe
+train_recipe <- recipe(label ~ ., data = train_split_data) %>%
+  update_role(chunk_id, new_role = "ID") %>%  
+  update_role(participant_id, new_role = "ID") %>% 
+  step_impute_knn(all_predictors(), neighbors = 4) %>%   # KNN imputation
+  step_normalize(all_numeric_predictors()) %>%  
+  step_dummy(all_nominal_predictors()) %>%      
+  step_zv(all_predictors())                     
+
+# Prepare the recipe
+prepped_recipe <- prep(train_recipe, training = train_split_data)
+
+# Apply transformations
+train_processed <- bake(prepped_recipe, new_data = train_split_data)
+val_processed <- bake(prepped_recipe, new_data = val_split_data)
+
+```
+
+## 6. knn model training
+```{R}
+library(kknn)
+# Define KNN model with k = 4
+knn_model <- nearest_neighbor(mode = "classification", neighbors = 4) %>%
+  set_engine("kknn")
+
+# Create a workflow
+train_workflow <- workflow() %>%
+  add_model(knn_model) %>%
+  add_recipe(train_recipe)
+
+# Train the KNN model
+trained_model <- fit(train_workflow, data = train_processed)
+
+# Make predictions on validation data
+val_predictions <- predict(trained_model, val_processed) %>%
+  bind_cols(val_split_data)  # Combine predictions with actual validation data
+
+# Evaluate model performance
+val_metrics <- val_predictions %>%
+  metrics(truth = label, estimate = .pred_class)
+
+print(val_metrics)
+```
+
+## fit model to the test data
+```{R}
+final_model <- fit(train_workflow, train_data)  # use all the data available for your model
+submission_data <- 
+  augment(final_model, test_data, type='class') %>% 
+  select(participant_id, chunk_id, .pred_class)
+submission_data %>%
+  rename(label = .pred_class)%>%
+  select(participant_id,chunk_id, label) %>%
+  write.csv('DSW25_knn_11_model_1.csv')
+```
+
+## hypoerparameter tuning
+```{R}
+# Load the randomForest package
+library(randomForest)
+
+set.seed(0)
+
+# Define the control method for RFE
+ctrl <- rfeControl(functions=rfFuncs, method="cv", number=10)  # 10-fold cross-validation
+
+# Perform RFE for feature selection using KNN as the model
+rfe_results <- rfe(train_processed[, -which(names(train_processed) == "label")], 
+                   train_processed$label, 
+                   sizes = c(1:5, 10, 15, 20),   # Sizes of features to try
+                   rfeControl = ctrl)
+
+# View the results of RFE
+print(rfe_results)
+
+# Extract the feature importance from the RFE results
+importance_data <- as.data.frame(rfe_results$variables)
+importance_data$Variable <- rownames(importance_data)
+
+# Sort the features by importance (descending order)
+importance_data_sorted <- importance_data[order(importance_data$Overall, decreasing = TRUE), ]
+
+# Select the most and least important features
+top_features <- head(importance_data_sorted, 20)  # Top 10 most important features
+bottom_features <- tail(importance_data_sorted, 20)  # Bottom 10 least important features
+
+# Combine the top and bottom features for plotting
+top_bottom_features <- rbind(top_features, bottom_features)
+
+# Plot the most and least important features separately
+ggplot(top_bottom_features, aes(x = reorder(Variable, Overall), y = Overall)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Most and Least Important Features (Based on RFE)",
+       x = "Features",
+       y = "Importance") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## retain the model with out negative features
+```{R}
+# It seems mean_bvp and skewness_temp has the most negative impact on the model so I took them out and retain the model.
+set.seed(0)
+# Remove 'split' from the dataset before creating the recipe
+train_data_clean <- train_data %>% 
+  select(-split, -skewness_temp, -mean_bvp)  # Remove least important features
+
+# Split the data
+data_split <- group_initial_split(train_data_clean, prop = 5/6, group = participant_id) 
+train_split_data <- training(data_split)
+val_split_data <- testing(data_split)
+
+# Step 1: Set up Cross-Validation
+cv_folds <- vfold_cv(train_split_data, v = 5)  # 5-fold cross-validation
+
+# Step 2: Define the KNN Model with tune() for 'neighbors'
+knn_model <- nearest_neighbor(mode = "classification", neighbors = tune()) %>%
+  set_engine("kknn")
+
+# Step 3: Define a grid of values for the 'neighbors' hyperparameter
+neighbors_grid <- grid_regular(neighbors(range = c(1, 20)), levels = 20)
+
+# Step 4: Define a recipe (same as before, if necessary)
+train_recipe <- recipe(label ~ ., data = train_split_data) %>%
+  update_role(chunk_id, new_role = "ID") %>%  
+  update_role(participant_id, new_role = "ID") %>% 
+  step_impute_knn(all_predictors(), neighbors = 4) %>%   # KNN imputation
+  step_normalize(all_numeric_predictors()) %>%  
+  step_dummy(all_nominal_predictors()) %>%      
+  step_zv(all_predictors())
+
+# Step 5: Create a Workflow
+tune_workflow <- workflow() %>%
+  add_model(knn_model) %>%
+  add_recipe(train_recipe)
+
+# Step 6: Tune the model with cross-validation
+tune_results <- tune_grid(
+  tune_workflow,
+  resamples = cv_folds,  # Cross-validation folds
+  grid = neighbors_grid,
+  control = control_grid(save_pred = TRUE)
+)
+
+# Step 7: Get the best model
+best_k <- select_best(tune_results, metric = "accuracy")  # Choose based on accuracy
+best_k
+
+# Step 8: Finalize the workflow with the best 'k'= 9
+final_knn_model <- nearest_neighbor(mode = "classification", neighbors = best_k$neighbors) %>%
+  set_engine("kknn")
+
+# Step 9: Train the final model with the optimal 'k'
+final_model <- fit(final_knn_model, label ~ ., data = train_split_data)
+
+# Step 10: Evaluate on validation data
+val_predictions <- predict(final_model, val_split_data) %>%
+  bind_cols(val_split_data)
+
+val_metrics <- val_predictions %>%
+  metrics(truth = label, estimate = .pred_class)
+
+print(val_metrics)
+
+```
+
+## fit model with out non_important features to the test data
+```{R}
+# Step 9: Train the final model on the entire training set
+final_model <- fit(final_knn_model, label ~ ., data = train_data_clean)
+# Step 10: Make predictions on the test data
+submission_data <- 
+  augment(final_model, test_data, type = "class") %>% 
+  select(participant_id, chunk_id, .pred_class)
+
+# Save the predictions
+submission_data %>%
+  rename(label = .pred_class) %>%
+  write.csv('DSW25_knn_11_model_without_2_features_2.csv', row.names = FALSE)
+```
+
+
+

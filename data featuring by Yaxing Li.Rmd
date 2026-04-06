@@ -1,0 +1,562 @@
+---
+title: "Feature Engineering"
+author: "Yaxing Li"
+date: "2025-03-05"
+output: html_document
+---
+# Import the data
+
+```{r}
+library(tidyverse) 
+data <- read_csv("../01. data wrangling/data_wrangled.csv.gz")
+```
+# Accelerometer
+### Accelerometer feature engineering
+```{r, cache=TRUE}
+
+data_accelerometer_wide <- data |>   # isolate accelerometer signals 
+  filter(sensor == "accelerometer") |> 
+
+  # we'll want a wide format to make the mutation easier
+  pivot_wider(names_from = "signal", values_from = "value")
+
+accelerometer_data <- data |> 
+  # isolate accelerometer signals 
+  filter(sensor == "accelerometer") |> 
+
+  # we'll want a wide format to make the mutation easier
+  pivot_wider(names_from = "signal", values_from = "value") |>   # add cartesian distance for accelerometer signals
+  mutate(magnitude = sqrt(x ^ 2 + y ^ 2 + z ^ 2)) |>  group_by(participant_id, chunk_id) |>  # Group by time window
+    summarize(
+        mean_mag = mean(magnitude),
+        sd_mag = sd(magnitude),
+        max_mag = max(magnitude),
+        min_mag = min(magnitude),
+        mad_mag = mad(magnitude),
+        .groups = "drop"
+    )
+summary(accelerometer_data)
+
+#check any outliers in max_mag
+ggplot(accelerometer_data, aes(y = max_mag)) +
+  geom_boxplot() +
+  labs(title = "Boxplot of Max Acceleration Magnitude")
+
+# identify these outliers in max_mag
+## Compute Q1 (25th percentile) and Q3 (75th percentile)
+Q1 <- quantile(accelerometer_data$max_mag, 0.25, na.rm = TRUE)
+Q3 <- quantile(accelerometer_data$max_mag, 0.75, na.rm = TRUE)
+IQR_value <- Q3 - Q1  # Compute the Interquartile Range (IQR)
+
+## Define lower and upper bounds
+lower_bound <- Q1 - 1.5 * IQR_value
+upper_bound <- Q3 + 1.5 * IQR_value
+
+outliers <- accelerometer_data |> 
+  filter(max_mag < lower_bound | max_mag > upper_bound)
+
+## Display the outlier rows
+print(outliers)
+
+## Display the outlier of participant_id == 1 plot
+data |> 
+  # isolate accelerometer signals 
+  filter(sensor == "accelerometer") |> 
+
+  # we'll want a wide format to make the mutation easier
+  pivot_wider(names_from = "signal", values_from = "value") |>   # add cartesian distance for accelerometer signals 
+  filter(participant_id == 1, chunk_id == 29) |>
+  pivot_longer(cols = c(x, y, z), names_to = "axis", values_to = "acceleration") |>  
+  ggplot(aes(x = unix_timestamp, y = acceleration, color = axis)) + 
+  geom_line() + 
+  facet_grid(axis ~ .) +  # Facet the plot by x, y, z axes
+  labs(title = "Accelerometer Signals (X, Y, Z) Over Time", 
+       x = "Timestamp", y = "Acceleration") +
+  theme_minimal()
+
+### remoove outliers (max_mag>5) in participant_id == 1
+# Store the rows where z has its maximum value for each chunk as a tibble
+outliers_tibble <- data |> 
+  # Isolate accelerometer signals 
+  filter(sensor == "accelerometer") |> 
+
+  # Convert to wide format
+  pivot_wider(names_from = "signal", values_from = "value") |>  
+
+  # Filter for specific participant and chunk
+  filter(participant_id == 1, chunk_id %in% c(29)) |>  
+
+  # Select the row where "z" has its maximum value (for each chunk separately)
+  group_by(chunk_id) |>  
+  filter(z == max(z, na.rm = TRUE)) |>  
+  ungroup()
+
+# View the tibble of outliers
+outliers_tibble
+
+
+## Display the outlier of participant_id == 5 plot
+data |> 
+  # isolate accelerometer signals 
+  filter(sensor == "accelerometer") |> 
+
+  # we'll want a wide format to make the mutation easier
+  pivot_wider(names_from = "signal", values_from = "value") |>   # add cartesian distance for accelerometer signals 
+  filter(participant_id == 5, chunk_id == 11) |>
+  pivot_longer(cols = c(x, y, z), names_to = "axis", values_to = "acceleration") |>  
+  ggplot(aes(x = unix_timestamp, y = acceleration, color = axis)) + 
+  geom_line() + 
+  facet_grid(axis ~ .) +  # Facet the plot by x, y, z axes
+  labs(title = "Accelerometer Signals (X, Y, Z) Over Time", 
+       x = "Timestamp", y = "Acceleration") +
+  theme_minimal()
+
+### identify outliers in participant_id == 5
+# Add the new rows where z has its maximum value for participant 5 and chunk 11 to the existing outliers_tibble
+outliers_tibble <- outliers_tibble |> 
+  bind_rows(
+    data |> 
+      # Isolate accelerometer signals 
+      filter(sensor == "accelerometer") |> 
+
+      # Convert to wide format
+      pivot_wider(names_from = "signal", values_from = "value") |>  
+
+      # Filter for specific participant and chunk
+      filter(participant_id == 5, chunk_id %in% c(11)) |>  
+
+      # Select the row where "z" has its maximum value (for each chunk separately)
+      group_by(chunk_id) |>  
+      filter(z == max(z, na.rm = TRUE)) |>  
+      ungroup()
+  )
+
+# View the updated tibble
+outliers_tibble
+
+## Display the outlier of participant_id == 6 plot
+data |> 
+  # isolate accelerometer signals 
+  filter(sensor == "accelerometer") |> 
+
+  # we'll want a wide format to make the mutation easier
+  pivot_wider(names_from = "signal", values_from = "value") |>   # add cartesian distance for accelerometer signals 
+  filter(participant_id == 6, chunk_id == 57) |>
+  pivot_longer(cols = c(x, y, z), names_to = "axis", values_to = "acceleration") |>  
+  ggplot(aes(x = unix_timestamp, y = acceleration, color = axis)) + 
+  geom_line() + 
+  facet_grid(axis ~ .) +  # Facet the plot by x, y, z axes
+  labs(title = "Accelerometer Signals (X, Y, Z) Over Time", 
+       x = "Timestamp", y = "Acceleration") +
+  theme_minimal()
+
+### remove outliers(max_mag>5) in participant_id == 6
+# Add the new rows where z has its maximum value for participant 5 and chunk 11 to the existing outliers_tibble
+outliers_tibble <- outliers_tibble |> 
+  bind_rows(
+    data |> 
+      # Isolate accelerometer signals 
+      filter(sensor == "accelerometer") |> 
+
+      # Convert to wide format
+      pivot_wider(names_from = "signal", values_from = "value") |>  
+
+      # Filter for specific participant and chunk
+      filter(participant_id == 6, chunk_id %in% c(32,37,54,57)) |>  
+
+      # Select the row where "z" has its maximum value (for each chunk separately)
+      group_by(chunk_id) |>  
+      filter(z == max(z, na.rm = TRUE)) |>  
+      ungroup()
+  )
+
+# View the updated tibble
+outliers_tibble
+
+# Remove rows from data where unix_timestamp is within 1 second of any unix_timestamp in outliers_tibble
+data_max_mag_cleaned <- data_accelerometer_wide %>%
+  rowwise() %>%  # Process each row of data individually
+  filter(
+    !any(
+      outliers_tibble$participant_id == participant_id &
+      outliers_tibble$chunk_id == chunk_id &
+      abs(outliers_tibble$unix_timestamp - unix_timestamp) <= 1
+    )
+  ) %>%
+  ungroup()  # Ungroup the data after rowwise processing
+
+# View the cleaned data
+data_max_mag_cleaned
+data_max_mag_cleaned_long <- data_max_mag_cleaned %>%
+  pivot_longer(cols = c(x, y, z), names_to = "signal", values_to = "value")
+
+
+# max_mag_cleaned data
+accelerometer_data_max_mag_cleaned <- data_max_mag_cleaned_long |> 
+  # isolate accelerometer signals 
+  filter(sensor == "accelerometer") |> 
+
+  # we'll want a wide format to make the mutation easier
+  pivot_wider(names_from = "signal", values_from = "value") |>   # add cartesian distance for accelerometer signals
+  mutate(magnitude = sqrt(x ^ 2 + y ^ 2 + z ^ 2)) |>  group_by(participant_id, chunk_id) |>  # Group by time window
+    summarize(
+        mean_mag = mean(magnitude),
+        sd_mag = sd(magnitude),
+        max_mag = max(magnitude),
+        min_mag = min(magnitude),
+        mad_mag = mad(magnitude),
+        .groups = "drop"
+    )
+summary(accelerometer_data_max_mag_cleaned)
+
+#check any outliers in max_mag
+ggplot(accelerometer_data_max_mag_cleaned, aes(y = max_mag)) +
+  geom_boxplot() +
+  labs(title = "Boxplot of Max Acceleration Magnitude Cleaned")
+```
+
+# BVP (heart rate)
+```{r}
+library(dplyr)
+library(e1071)  # For skewness and kurtosis
+
+# Extract BVP signals
+data_bvp <- data |> 
+  filter(sensor == "bvp")
+
+# Calculate time differences (d_time) and BPM for BVP signals
+feature_bpm <- data_bvp |> 
+  group_by(participant_id, chunk_id) |> 
+  # Get local maxima (detect peaks)
+  filter(value > lag(value), value > lead(value)) |> 
+  # Calculate time difference between consecutive beats (d_time)
+  mutate(d_time = unix_timestamp - lag(unix_timestamp, default = 0)) |> 
+  # Filter out likely duplicates (time difference less than 0.25)
+  filter(d_time >= 0.25) |> 
+  # Calculate beats per minute (bpm)
+  summarize(bpm = (60 / mean(d_time, na.rm = TRUE)), 
+            d_time = mean(d_time, na.rm = TRUE), # also calculate average d_time for chunk
+            .groups = "drop") |> 
+  # Filter out bpm values less than 50
+  filter(bpm >= 50)
+
+# Check the lowest bpm values after filtering
+feature_bpm |> 
+  arrange(bpm) |> 
+  head()
+
+
+# Calculate BVP features including HRV (Standard Deviation of RR intervals)
+bvp_features <- data_bvp %>%
+  group_by(participant_id, chunk_id) %>%
+  summarize(
+    mean_bvp = mean(value, na.rm = TRUE),
+    sd_bvp = sd(value, na.rm = TRUE),
+    min_bvp = min(value, na.rm = TRUE),
+    max_bvp = max(value, na.rm = TRUE),
+    skewness_bvp = skewness(value, na.rm = TRUE),
+    kurtosis_bvp = kurtosis(value, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+bvp_features
+
+# Join bvp_features with feature_bpm to include bpm and d_time
+final_bvp_features <- left_join( feature_bpm,bvp_features, by = c("participant_id", "chunk_id"))
+
+# Display the final features
+final_bvp_features
+```
+
+# eda
+```{r}
+library(dplyr)
+library(e1071)  # For skewness and kurtosis
+library(pracma) # For peak detection
+# Extract EDA signals
+data_eda <- data |> filter(sensor == "eda")
+
+# Extract EDA signals for Participant 1, Chunk 1
+eda_data <- data %>%
+  filter(sensor == "eda", participant_id == 8, chunk_id == 7) %>%
+  arrange(unix_timestamp)  # Ensure sorted by time
+
+# Detect peaks in EDA
+eda_peaks <- eda_data %>%
+  mutate(
+    d_time = unix_timestamp - lag(unix_timestamp),  # Compute time difference
+    diff1 = value - lag(value),  # First derivative
+    diff2 = lead(value) - value  # Next step derivative
+  ) %>%
+  filter(diff1 > 0 & diff2 < 0 & value > 0.05)  # Identify peaks (SCRs)
+
+# Plot the EDA signal with detected peaks
+ggplot(eda_data, aes(x = unix_timestamp, y = value)) +
+  geom_line(color = "blue") +  # EDA signal line
+  geom_point(data = eda_peaks, aes(x = unix_timestamp, y = value), 
+             color = "red", size = 3) +  # Highlight peaks in red
+  labs(
+    title = "EDA Signal with Detected Peaks (Participant 1, Chunk 1)",
+    x = "Time (Unix Timestamp)",
+    y = "EDA Value"
+  ) +
+  theme_minimal()
+
+# Detect peaks in EDA for phasic response detection
+eda_phasic <- eda_data %>%
+  mutate(
+    d_time = unix_timestamp - lag(unix_timestamp),  # Compute time difference
+    diff1 = value - lag(value),  # First derivative (rate of change)
+    diff2 = lead(value) - value  # Next derivative
+  ) %>%
+  filter(diff1 > 0 & diff2 < 0 & value > 0.05)  # Local maxima
+
+# Calculate amplitude and recovery time for phasic responses
+eda_phasic <- eda_phasic %>%
+  mutate(
+    peak_amplitude = value - lag(value, default = first(value)),  # Amplitude from previous value
+    recovery_time = lead(unix_timestamp) - unix_timestamp  # Recovery time to next peak
+  )
+
+
+# View the detected phasic responses
+eda_phasic %>%
+  select(participant_id, chunk_id, unix_timestamp, value, peak_amplitude, recovery_time) %>%
+  head()
+
+# Compute tonic features (SCL)
+eda_tonic <- data_eda %>%
+  group_by(participant_id, chunk_id) %>%
+  summarize(
+    mean_scl = mean(value, na.rm = TRUE),
+    sd_scl = sd(value, na.rm = TRUE),
+    min_scl = min(value, na.rm = TRUE),
+    max_scl = max(value, na.rm = TRUE),
+    scl_slope = (last(value) - first(value)) / (n() - 1),
+    .groups = "drop"
+  )
+eda_tonic
+
+# Detect phasic responses (SCR)
+all_chunks <- data_eda %>%
+  select(participant_id, chunk_id) %>%
+  distinct()
+
+eda_phasic <- data_eda %>%
+  group_by(participant_id, chunk_id) %>%
+  mutate(
+    d_time = unix_timestamp - lag(unix_timestamp),
+    diff1 = value - lag(value),
+    diff2 = lead(value) - value
+  ) %>%
+  filter(diff1 > 0 & diff2 < 0 & value > 0.05) %>%
+  group_by(participant_id, chunk_id) %>%
+  summarize(
+    scr_peaks = n(),
+    scr_mean_amplitude = mean(value, na.rm = TRUE),
+    scr_max_amplitude = max(value, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Left join to keep all chunks, even those with no peaks
+eda_phasic <- left_join(all_chunks, eda_phasic, by = c("participant_id", "chunk_id"))
+
+# Replace NA values with 0 for chunks with no detected peaks
+eda_phasic <- eda_phasic %>%
+  mutate(
+    scr_peaks = ifelse(is.na(scr_peaks), 0, scr_peaks),
+    scr_mean_amplitude = ifelse(is.na(scr_mean_amplitude), 0, scr_mean_amplitude),
+    scr_max_amplitude = ifelse(is.na(scr_max_amplitude), 0, scr_max_amplitude)
+  )
+
+# View the result
+eda_phasic
+
+
+# Combine all features
+eda_features <- left_join(eda_tonic, eda_phasic, by = c("participant_id", "chunk_id"))
+
+# Display features
+eda_features
+
+# Reshape the data to long format
+eda_features_long <- eda_features %>%
+  pivot_longer(cols = mean_scl:scl_slope, names_to = "feature", values_to = "value")
+
+# Create the boxplot for each feature
+ggplot(eda_features_long, aes(x = feature, y = value)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Boxplot of EDA Features for Each Row", x = "Feature", y = "Value") +
+  theme_minimal()
+
+# Calculate the IQR for the max_scl feature
+Q1 <- quantile(eda_features$max_scl, 0.25, na.rm = TRUE)
+Q3 <- quantile(eda_features$max_scl, 0.75, na.rm = TRUE)
+IQR <- Q3 - Q1
+
+# Define the outlier thresholds
+lower_bound <- Q1 - 1.5 * IQR
+upper_bound <- Q3 + 1.5 * IQR
+
+# Identify rows with outliers in max_scl
+outliers <- eda_features %>%
+  filter(max_scl < lower_bound | max_scl > upper_bound)
+
+# View outlier rows
+outliers
+
+# participant 8 max_scl>3 in break labels? delete?
+eda_features_filtered_max_scl <- eda_features %>%
+  filter(max_scl <= 2)
+
+# View the filtered data
+eda_features_filtered_max_scl
+```
+
+# temperature
+```{R}
+
+# Extract EDA signals
+data_temperature <- data |> filter(sensor == "temperature")
+
+# Assuming 'data_temperature' contains unix_timestamp and value columns
+temperature_features <- data_temperature %>%
+  group_by(participant_id, chunk_id) %>%
+  mutate(
+    # Calculate time difference (d_time) between consecutive time points
+    d_time = unix_timestamp - lag(unix_timestamp),  
+    # Calculate the rate of change (dT) between consecutive time points
+    rate_of_change = (value - lag(value)) / d_time
+  ) %>%
+  summarize(
+    mean_temp = mean(value, na.rm = TRUE),
+    sd_temp = sd(value, na.rm = TRUE),
+    min_temp = min(value, na.rm = TRUE),
+    max_temp = max(value, na.rm = TRUE),
+    range_temp = max(value, na.rm = TRUE) - min(value, na.rm = TRUE),
+    median_temp = median(value, na.rm = TRUE),
+    skewness_temp = skewness(value, na.rm = TRUE),
+    kurtosis_temp = kurtosis(value, na.rm = TRUE),
+    mean_rate_of_change = mean(rate_of_change, na.rm = TRUE),  # Mean rate of change
+    max_rate_of_change = max(rate_of_change, na.rm = TRUE),    # Maximum rate of change
+    .groups = "drop"
+  )
+
+# View the temperature features with rate of change
+temperature_features
+
+# Calculate IQR-based outliers for temperature features
+temperature_features_outliers <- temperature_features %>%
+  mutate(
+    # Calculate IQR for each feature
+    iqr_temp = IQR(c(min_temp, max_temp), na.rm = TRUE),
+    lower_bound = quantile(c(min_temp, max_temp), 0.25, na.rm = TRUE) - 1.5 * iqr_temp,
+    upper_bound = quantile(c(min_temp, max_temp), 0.75, na.rm = TRUE) + 1.5 * iqr_temp
+  ) %>%
+  filter(min_temp < lower_bound | max_temp > upper_bound)  # Filter out the outliers based on IQR
+
+
+# View the outliers
+temperature_features_outliers
+
+# Create a boxplot for min_temp and max_temp, highlighting outliers
+ggplot(temperature_features, aes(x = factor(1), y = min_temp)) +
+  geom_boxplot(outlier.colour = "red", outlier.size = 3) +
+  geom_boxplot(aes(y = max_temp), outlier.colour = "blue", outlier.size = 3) +
+  labs(title = "Boxplot of Temperature Features (min_temp and max_temp)",
+       x = "Temperature Features",
+       y = "Temperature Value") +
+  theme_minimal()
+
+# Filter the data for participant_id == 1 and chunk_id == 1
+data_temperature_filtered <- data_temperature %>%
+  filter(participant_id == 4, chunk_id == 12)
+
+# Plot the temperature values
+ggplot(data_temperature_filtered, aes(x = unix_timestamp, y = value)) +
+  geom_line(color = "blue") +
+  labs(title = "Temperature over Time for Participant 1, Chunk 1",
+       x = "Time (Unix Timestamp)",
+       y = "Temperature Value") +
+  theme_minimal()
+```
+
+# corrlelation between tempature and heart rate and scl
+```{R}
+library(corrplot)
+
+merged_data <- temperature_features %>%
+  left_join(eda_features_filtered_max_scl, by = c("participant_id", "chunk_id")) %>%
+  left_join(final_bvp_features, by = c("participant_id", "chunk_id"))
+
+# Calculate correlation matrix for selected features
+cor_matrix <- merged_data %>%
+  select(mean_temp, mean_rate_of_change, bpm, mean_scl,scr_peaks) %>%  # Adjust feature names as needed
+  cor(use = "complete.obs", method = "pearson")  # Calculate Pearson correlation (you can change to 'spearman' if needed)
+
+# View the correlation matrix
+print(cor_matrix)
+
+# Visualize the correlation matrix
+corrplot(cor_matrix, method = "circle", type = "upper", tl.col = "black", diag = FALSE)
+
+# You can also plot scatter plots to see relationships
+ggplot(merged_data, aes(x = bpm, y = mean_temp)) + 
+  geom_point() + 
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  labs(title = "Correlation between BPM and Temperature")
+
+ggplot(merged_data, aes(x = bpm, y = scr_peaks)) + 
+  geom_point() + 
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  labs(title = "Correlation between BPM and SCR Peaks")
+
+# Fit a linear model
+lm_model <- lm(bpm ~ scr_peaks, data = merged_data)
+
+# Predict bpm based on scr_peaks and create a new variable
+merged_data <- merged_data %>%
+  mutate(
+    bpm_predicted_from_scr_peaks = predict(lm_model, newdata = merged_data)
+  )
+```
+
+# cook them together
+```{R}
+accelerometer_data_max_mag_cleaned
+final_bvp_features
+eda_features_filtered_max_scl
+temperature_features
+merged_data$bpm_predicted_from_scr_peaks
+# Merge the datasets one by one, ensuring that missing observations are filled with NAs
+merged_data <- temperature_features %>%
+  full_join(eda_features_filtered_max_scl, by = c("participant_id", "chunk_id")) %>%
+  full_join(accelerometer_data_max_mag_cleaned, by = c("participant_id", "chunk_id")) %>%
+  full_join(final_bvp_features, by = c("participant_id", "chunk_id")) %>%
+  full_join(merged_data %>% select(participant_id, chunk_id, bpm_predicted_from_scr_peaks), 
+            by = c("participant_id", "chunk_id"))
+
+# View the merged data
+head(merged_data)
+
+
+# Merge the labels into the merged_data
+label_data_unique <- data %>%
+  select(participant_id, chunk_id, label) %>%
+  distinct()
+
+final_label_merged_data <- merged_data %>%
+  left_join(label_data_unique , by = c("participant_id", "chunk_id"))
+
+split_data_unique <- data %>%
+  select(participant_id, chunk_id, split) %>%
+  distinct()
+
+final_split_merged_data <- final_label_merged_data %>%
+  left_join(split_data_unique , by = c("participant_id", "chunk_id"))
+
+# Save the final engineered dataset to CSV
+write.csv(final_split_merged_data, "final_engineered_data.csv", row.names = FALSE)
+
+```
