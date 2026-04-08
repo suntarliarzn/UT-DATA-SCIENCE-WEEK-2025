@@ -16,9 +16,9 @@ I explored multiple machine learning and deep learning approaches, with a strong
 
 Across all models, I focused on:
 
-Validation accuracy
-Generalization across participants
-Robustness to feature selection
+- Validation accuracy
+- Generalization across participants
+- Robustness to feature selection
 
 ## Key idea
 
@@ -31,6 +31,6 @@ Methods used:
 - SHAP values (for XGBoost)
 
 ## Key findings:
-Some features had negative impact on performance
-Removing noisy variables improved generalization
-Different models relied on different feature subsets
+- Some features had negative impact on performance
+- Removing noisy variables improved generalization
+- Different models relied on different feature subsets
